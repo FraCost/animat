@@ -76,7 +76,7 @@ best_rnn.W_in[:, [1, 2]] = best_rnn.W_in[:, [2, 1]]
 # plt.title("Input Weights")
 # plt.xlabel("Input Features")
 # plt.ylabel("Hidden Units")
-env.evaluate(best_rnn, seed=0, render=True, log=True)
+env.evaluate(best_rnn, seed=0, render=False, log=True)
 env.plot()
 
 # %%
@@ -429,7 +429,7 @@ for unit_idx in range(0, rnn.hidden_size):
         action_modifier=1,
         delay=1,
         seed=0,
-        render=True if unit_idx == 0 else False,
+        render=False if unit_idx == 0 else False,
     )
 
     # Plot force vectors over time
@@ -567,3 +567,5 @@ for unit_idx in range(0, rnn.hidden_size):
         reacher.hand_position_stats["min"][1], reacher.hand_position_stats["max"][1]
     )
     plt.show()
+
+# %%

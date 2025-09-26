@@ -57,7 +57,7 @@ if __name__ == "__main__":
 
     # Optimization setup
     optimizer = CMA(mean=rnn.get_params(), sigma=1.3)
-    num_generations = 10000
+    num_generations = 3 #10000
     fitnesses = []
     for gg in range(num_generations):
         solutions = []
@@ -71,7 +71,7 @@ if __name__ == "__main__":
 
         best_rnn = rnn.from_params(optimizer.mean)
         if gg % 10 == 0:
-            env.evaluate(best_rnn, seed=0, render=True, log=True)
+            env.evaluate(best_rnn, seed=0, render=False, log=True)
             env.plot()
         if gg % 1000 == 0:
             file = f"../../models/optimizer_gen_{gg}_cmaesv2.pkl"
@@ -117,3 +117,5 @@ plt.xlabel("Iterations")
 plt.ylabel("Objective Function Value (Loss)")
 plt.title("Fitness During CMA-ES Optimization")
 plt.show()
+
+# %%

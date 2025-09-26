@@ -54,18 +54,7 @@ class SequentialReacher:
             self.data.qpos[i] = np.random.uniform(np.deg2rad(-60), np.deg2rad(60))
         mujoco.mj_forward(self.model, self.data)
 
-    # def fabrik(self, position):
-    #     """FABRIK algorithm to solve inverse kinematics for a 2D arm"""
-    #     # Initialize the arm configuration
-    #     arm_length = 0.1  # Length of each arm segment
-    #     num_segments = 2  # Number of segments in the arm
-    #     arm_positions = np.zeros((num_segments + 1, 2))  # (x, y) positions of each segment
-    #     arm_positions[0] = self.data.mocap_pos[0][:2]  # Start from the current position
-
-    #     pass
-
-    def solve_ik(self, position, max_iters=100, tol=1e-4, alpha=0.5
-    ):
+    def solve_ik(self, position, max_iters=100, tol=1e-4, alpha=0.5):
         dof_idxs = [self.model.jnt_dofadr[j] for j in [0, 1]]
 
         for i in range(max_iters):
