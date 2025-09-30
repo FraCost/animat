@@ -7,13 +7,16 @@ from utils import *
 
 
 class SequentialReachingEnv:
+    # -----------------------------------------
+    # Initialization
+    # -----------------------------------------
     def __init__(
         self, 
         plant, 
         target_duration, 
         num_targets, 
         loss_weights, 
-        num_interneurons=10
+        num_interneurons=20
         ):
         
         self.plant = plant
@@ -22,9 +25,51 @@ class SequentialReachingEnv:
         self.loss_weights = loss_weights
         self.logger = None
         self.num_interneurons = num_interneurons
-        self.n_muscles = plant.num_actuators
-        self.W_inter_to_gamma = np.random.randn(self.n_muscles, self.num_interneurons) # Interneuron → gamma MN weight matrix
+        self.num_actuators = plant.num_actuators
+        self.W_inter_to_gamma = self.init_W_inter_to_gamma(mode='struct_indip')
+        self.actuator_names = self.plant.actuator_names
+    
+    def init_W_inter_to_gamma(self, mode='struct_indip'):
+        if mode == 'rand':
+            return np.random.randn(self.num_actuators, self.num_interneurons) 
 
+        elif mode == 'struct_indip':  
+            if self.num_actuators % 2 != 0:
+                raise ValueError("Number of muscles must be even")
+            
+            num_joints = self.num_actuators // 2
+            W = np.zeros((self.num_actuators, self.num_interneurons))
+            
+            # Split interneurons evenly across joints
+            base = self.num_interneurons // num_joints
+            extra = self.num_interneurons % num_joints
+            start = 0
+            
+            for j in range(num_joints):
+                end = start + base + (1 if j < extra else 0)
+                num_units = end - start
+                
+                # Linear gradient for this joint
+                W0 = np.linspace(1.0, 0.0, num_units)
+                W1 = np.linspace(0.0, 1.0, num_units)
+                
+                W[2*j, start:end] = W0
+                W[2*j+1, start:end] = W1
+                
+                start = end
+            
+            return W
+
+        elif mode == 'struct_mixed':
+            # TODO: implement via optimization
+            pass
+        
+        else:
+            raise ValueError(
+                "Invalid mode for W_inter_to_gamma initialization.\n"
+                "Choose 'rand', 'struct_indip', or 'struct_mixed'."
+            )
+        
     # -----------------------------------------
     # Logging
     # -----------------------------------------
@@ -88,17 +133,12 @@ class SequentialReachingEnv:
             # RNN → interneurons
             interneurons = rnn.step(obs)
 
-            # Interneurons → gamma offsets
+            # Interneurons → gamma MN offsets
             gamma_offsets = self.W_inter_to_gamma @ interneurons  
 
             # Compute alpha activations
-            spindle_lengths = np.array([
-                feedback[0],  # deltoid length
-                feedback[1],  # latissimus length
-                feedback[2],  # biceps length
-                feedback[3]   # triceps length
-            ])
-            alpha_act = spindle_lengths + gamma_offsets
+            spindle_lengths = np.array(feedback[:self.num_actuators])
+            alpha_act = spindle_lengths + gamma_offsets # TODO: add scaling and/or nonlinearity
 
             # Send final control signal to MuJoCo
             self.plant.step(alpha_act)
@@ -122,14 +162,13 @@ class SequentialReachingEnv:
             total_reward += reward
 
             if log:
-                sensors_dict = {
-                    "deltoid_len": feedback[0], "latissimus_len": feedback[1],
-                    "biceps_len": feedback[2], "triceps_len": feedback[3],
-                    "deltoid_vel": feedback[4], "latissimus_vel": feedback[5],
-                    "biceps_vel": feedback[6], "triceps_vel": feedback[7],
-                    "deltoid_frc": feedback[8], "latissimus_frc": feedback[9],
-                    "biceps_frc": feedback[10], "triceps_frc": feedback[11],
-                }
+                sensors_dict = {}
+                n = self.num_actuators
+                for i, name in enumerate(self.actuator_names):
+                    sensors_dict[f"{name}_len"] = feedback[i]
+                    sensors_dict[f"{name}_vel"] = feedback[n + i]
+                    sensors_dict[f"{name}_frc"] = feedback[2*n + i]
+                    
                 self.log(
                     time=self.plant.data.time,
                     sensors=sensors_dict,
@@ -154,10 +193,8 @@ class SequentialReachingEnv:
     # -----------------------------------------
     # Stimulation
     # -----------------------------------------
-    def stimulate(self, rnn, units, action_modifier=1, delay=1, seed=0, render=False):
-        """Stimulate specified RNN units and record forces."""
+    def stimulate(self, units, delay=1, seed=0, render=False):
         np.random.seed(seed)
-        rnn.init_state()
         self.plant.reset()
 
         if render:
@@ -173,6 +210,7 @@ class SequentialReachingEnv:
         grid_pos_idx = 0
         self.plant.update_nail(grid_positions[grid_pos_idx])
 
+        # Dummy target, mainly for plant mechanics
         target_position = self.plant.sample_targets(1)
         self.plant.update_target(target_position)
 
@@ -180,26 +218,19 @@ class SequentialReachingEnv:
             if render:
                 self.plant.render()
 
-            context, feedback = self.plant.get_obs()
-            obs = np.concatenate([context, feedback])
+            _, feedback = self.plant.get_obs()
+            spindle_lengths = np.array(feedback[:self.num_actuators])
 
-            # Stimulate specified units
+            # Directly stimulate specified interneurons
+            interneurons = np.zeros(self.num_interneurons)
             if self.plant.data.time > total_delay - delay / 2:
-                rnn.h[units] = rnn.activation(np.inf)
+                interneurons[units] = 1.0  # max activation
 
-            # Update nail position
-            if self.plant.data.time > total_delay:
-                grid_pos_idx += 1
-                self.plant.update_nail(grid_positions[grid_pos_idx])
-                total_delay += delay
-
-            # RNN → Interneurons → Gamma → Alpha
-            interneurons = rnn.step(obs)
+            # Interneurons → gamma offsets → alpha activations
             gamma_offsets = self.W_inter_to_gamma @ interneurons
-            spindle_lengths = np.array([feedback[0], feedback[1], feedback[2], feedback[3]])
             alpha_act = spindle_lengths + gamma_offsets
-            alpha_act *= action_modifier
 
+            # Step the plant
             self.plant.step(alpha_act)
 
             # Log forces
@@ -209,6 +240,13 @@ class SequentialReachingEnv:
             force_data["position"].append(grid_positions[grid_pos_idx])
             force_data["force"].append(force)
 
+            # Update nail position
+            if self.plant.data.time > total_delay:
+                grid_pos_idx += 1
+                if grid_pos_idx < len(grid_positions):
+                    self.plant.update_nail(grid_positions[grid_pos_idx])
+                total_delay += delay
+
         self.plant.close()
         return force_data
 
@@ -217,6 +255,7 @@ class SequentialReachingEnv:
     # -----------------------------------------
     def plot(self):
         log = self.logger
+        n_muscles = self.num_actuators
 
         _, axes = plt.subplots(3, 2, figsize=(10, 10))
 
@@ -226,7 +265,6 @@ class SequentialReachingEnv:
         )[0]
         target_onset_idcs = np.insert(target_onset_idcs, 0, 0)
         target_onset_times = np.array([log["time"][idx] for idx in target_onset_idcs])
-
         for t in target_onset_times:
             for ax in axes.flat:
                 ax.axvline(x=t, color="gray", linestyle="--", linewidth=0.5)
@@ -234,19 +272,22 @@ class SequentialReachingEnv:
         linewidth = 1
 
         # Length
-        for i, muscle in enumerate(["deltoid_len","latissimus_len","biceps_len","triceps_len"]):
-            axes[0,0].plot(log["time"], log["sensors"][muscle], label=muscle.capitalize())
+        length_keys = [f"{name}_len" for name in self.actuator_names]
+        for k in length_keys:
+            axes[0,0].plot(log["time"], log["sensors"][k], label=k)
         axes[0,0].set_title("Length")
 
         # Velocity
-        for i, muscle in enumerate(["deltoid_vel","latissimus_vel","biceps_vel","triceps_vel"]):
-            axes[0,1].plot(log["time"], log["sensors"][muscle], label=muscle.capitalize())
+        vel_keys = [f"{name}_vel" for name in self.actuator_names]
+        for k in vel_keys:
+            axes[0,1].plot(log["time"], log["sensors"][k], label=k)
         axes[0,1].set_title("Velocity")
         axes[0,1].legend(loc="center left", bbox_to_anchor=(1,0.5))
 
         # Force
-        for i, muscle in enumerate(["deltoid_frc","latissimus_frc","biceps_frc","triceps_frc"]):
-            axes[1,0].plot(log["time"], log["sensors"][muscle], label=muscle.capitalize())
+        frc_keys = [f"{name}_frc" for name in self.actuator_names]
+        for k in frc_keys:
+            axes[1,0].plot(log["time"], log["sensors"][k], label=k)
         axes[1,0].set_title("Force")
 
         # Distance
