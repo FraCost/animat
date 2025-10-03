@@ -13,8 +13,7 @@ if __name__ == "__main__":
     # ----------------------------------------------------------
     # 1) Initialize the Mujoco plant
     # ----------------------------------------------------------
-    reacher = SequentialReacher(plant_xml_file="arm_model.xml")
-    # reacher = SequentialReacher(plant_xml_file="one_joint_arm.xml")
+    reacher = SequentialReacher(plant_xml_file="arm.xml")
 
     # ----------------------------------------------------------
     # 2) Initialize task

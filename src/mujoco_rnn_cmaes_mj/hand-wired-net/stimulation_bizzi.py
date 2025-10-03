@@ -5,9 +5,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from plants import SequentialReacher
 from environments import SequentialReachingEnv
-from networks import RNN
 from utils import *
-from sklearn.decomposition import PCA
 
 # %%
 reacher = SequentialReacher(plant_xml_file="arm.xml")

@@ -35,7 +35,6 @@ class SequentialReacher:
 
         
         # Load precomputed stats
-        '''
         model_name = os.path.splitext(plant_xml_file)[0]
         with open(os.path.join(mj_dir, f"sensor_stats_{model_name}.pkl"), "rb") as f:
             self.sensor_stats = pickle.load(f)
@@ -45,8 +44,8 @@ class SequentialReacher:
             self.candidate_targets = pickle.load(f)
         with open(os.path.join(mj_dir, f"grid_positions_{model_name}.pkl"), "rb") as f:
             self.grid_positions = pickle.load(f)
+        
         '''
-         
         with open(os.path.join(mj_dir, f"sensor_stats.pkl"), "rb") as f:
             self.sensor_stats = pickle.load(f)
         with open(os.path.join(mj_dir, f"hand_position_stats.pkl"), "rb") as f:
@@ -55,6 +54,8 @@ class SequentialReacher:
             self.candidate_targets = pickle.load(f)
         with open(os.path.join(mj_dir, f"grid_positions.pkl"), "rb") as f:
             self.grid_positions = pickle.load(f)
+        '''
+        
     
     def randomize_configuration(self):
         """Randomize the configuration of all joints"""
@@ -169,6 +170,14 @@ class SequentialReacher:
 
         force_vec = self.data.efc_force[efc_start : efc_start + constraint_dim]
         return force_vec
+    
+    def get_joint_angles_deg(self):
+        joint_angles = {}
+        for j in range(self.num_joints):
+            joint_name = self.model.joint(j).name
+            qpos_index = self.model.jnt_dofadr[j]  # index in qpos
+            joint_angles[joint_name] = np.rad2deg(self.data.qpos[qpos_index])
+        return joint_angles
 
     def close(self):
         if self.viewer is not None:

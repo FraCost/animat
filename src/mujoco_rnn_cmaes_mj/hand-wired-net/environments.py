@@ -191,7 +191,7 @@ class SequentialReachingEnv:
         return total_reward / trial_duration
 
     # -----------------------------------------
-    # Stimulation
+    # Stimulation # TODO: go back to stimulating RNN units to get multi-joint CFFs
     # -----------------------------------------
     def stimulate(self, units, delay=1, seed=0, render=False):
         np.random.seed(seed)
