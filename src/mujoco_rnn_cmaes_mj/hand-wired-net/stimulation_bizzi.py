@@ -16,7 +16,7 @@ env = SequentialReachingEnv(
     plant=reacher,
     target_duration={"mean": 3, "min": 1, "max": 6},
     num_targets=10,
-    num_interneurons=20,
+    num_interneurons=25,
     loss_weights={
         "euclidean": 1,
         "manhattan": 0,
@@ -57,7 +57,11 @@ plt.ylabel("Z Coordinate")
 plt.grid(True)
 plt.show()
 
+
 # %%
+fontsize = 20
+save_dir = "/Users/teachinglab/Library/CloudStorage/GoogleDrive-francesco.costantino@research.fchampalimaud.org/My Drive/Research projects/Paton lab/Plots"
+
 for unit_idx in range(0, env.num_interneurons):
 
     force_data = env.stimulate(
@@ -81,9 +85,9 @@ for unit_idx in range(0, env.num_interneurons):
         lower_percentile = np.percentile(force_vecs, 1)
         upper_percentile = np.percentile(force_vecs, 99)
         plt.ylim([lower_percentile, upper_percentile])
-        plt.xlabel("Time (s)")
-        plt.ylabel("Force (a.u.)")
-        plt.title("Force Vectors Over Time")
+        plt.xlabel("Time (s)", fontsize=fontsize)
+        plt.ylabel("Force (a.u.)", fontsize=fontsize)
+        plt.title("Force Vectors Over Time", fontsize=fontsize)
         plt.legend()
         plt.tight_layout()
         plt.show()
@@ -126,12 +130,8 @@ for unit_idx in range(0, env.num_interneurons):
     rest_average_forces = np.array(rest_average_forces)
     stim_average_forces = np.array(stim_average_forces)
 
-    print(average_positions.shape)
-    print(rest_average_forces.shape)
-    print(stim_average_forces.shape)
-
-    plt.figure(figsize=(8, 8))
-
+    fig, ax = plt.subplots(1, 3, figsize=(24, 8), sharey=True, sharex=True)
+    
     # Extract x and y components from average positions and forces
     x_positions = [pos[0] for pos in average_positions]
     y_positions = [pos[1] for pos in average_positions]
@@ -139,19 +139,19 @@ for unit_idx in range(0, env.num_interneurons):
     y_forces = [force[1] for force in stim_average_forces]
 
     # Plot the 2D vector field
-    plt.quiver(
-        x_positions,
-        y_positions,
-        x_forces,
-        y_forces,
-        angles="xy",
-        scale_units="xy",
-        scale=500,
-        linewidth=1,
-        color="red",
-        edgecolor="red",
-        facecolor='none',
-        label="Stimulated",
+    ax[0].quiver(
+            x_positions,
+            y_positions,
+            x_forces,
+            y_forces,
+            angles="xy",
+            scale_units="xy",
+            scale=500,
+            linewidth=1,
+            color="red",
+            edgecolor="red",
+            facecolor='none',
+            label="Stimulated",
     )
 
     # Extract x and y components from average positions and forces
@@ -159,44 +159,58 @@ for unit_idx in range(0, env.num_interneurons):
     y_positions = [pos[1] for pos in average_positions]
     x_forces = [force[0] for force in rest_average_forces]
     y_forces = [force[1] for force in rest_average_forces]
-
-    # Compute the weighted average of positions using the magnitude of stim forces
-    force_magnitudes = np.linalg.norm(stim_average_forces, axis=1)  # ||F||
-    convergence_point_weighted = np.average(average_positions, axis=0, weights=force_magnitudes)
-    plt.scatter(
-    convergence_point_weighted[0],
-    convergence_point_weighted[1],
-    color="red",
-    s=200,
-    edgecolor="black",
-)
+    
     # Plot the 2D vector field
-    plt.quiver(
+    ax[1].quiver(
+            x_positions,
+            y_positions,
+            x_forces,
+            y_forces,
+            angles="xy",
+            scale_units="xy",
+            scale=500,
+            linewidth=1,
+            color="black",
+            edgecolor="black",
+            facecolor='none',
+            label="Rest",
+    )
+    
+    # Compute the difference between stimulated and rest forces
+    x_diff = [s - r for s, r in zip([f[0] for f in stim_average_forces], [f[0] for f in rest_average_forces])]
+    y_diff = [s - r for s, r in zip([f[1] for f in stim_average_forces], [f[1] for f in rest_average_forces])]
+
+    # Plot the difference in the third subplot
+    ax[2].quiver(
         x_positions,
         y_positions,
-        x_forces,
-        y_forces,
+        x_diff,
+        y_diff,
         angles="xy",
         scale_units="xy",
         scale=500,
         linewidth=1,
-        color="black",
-        edgecolor="black",
+        color="blue",
+        edgecolor="blue",
         facecolor='none',
-        label="Rest",
+        label="Difference",
     )
 
-    plt.legend()
+    for a in ax:
+        a.set_aspect('equal', adjustable='box')
+        a.set_xlim(reacher.hand_position_stats["min"][0], reacher.hand_position_stats["max"][0])
+        a.set_ylim(reacher.hand_position_stats["min"][1], reacher.hand_position_stats["max"][1])
 
-    plt.title(f"Convergence force field (CFF) stimulating unit {unit_idx}")
-    plt.xlabel("X Position")
-    plt.ylabel("Y Position")
-    plt.grid(True)
-    plt.axis("equal")
-    plt.xlim(
-        reacher.hand_position_stats["min"][0], reacher.hand_position_stats["max"][0]
-    )
-    plt.ylim(
-        reacher.hand_position_stats["min"][1], reacher.hand_position_stats["max"][1]
-    )
+    ax[0].set_title("Stimulated", fontsize=fontsize)
+    ax[1].set_title("Rest", fontsize=fontsize)
+    ax[2].set_title("Difference", fontsize=fontsize)  
+    fig.suptitle(f"Force field unit #{unit_idx}", fontsize=fontsize)
+    
+    ax[1].set_xlabel("X Position", fontsize=fontsize)
+    ax[0].set_ylabel("Y Position", fontsize=fontsize)
+
     plt.show()
+    
+    #fig.savefig(os.path.join(save_dir, f"cff_unit_{unit_idx}.png"), bbox_inches="tight")
+
+# %%

@@ -33,7 +33,6 @@ class SequentialReacher:
         )
         self.hand_default_mass = self.model.body_mass[self.hand_id]
 
-        
         # Load precomputed stats
         model_name = os.path.splitext(plant_xml_file)[0]
         with open(os.path.join(mj_dir, f"sensor_stats_{model_name}.pkl"), "rb") as f:
@@ -44,18 +43,6 @@ class SequentialReacher:
             self.candidate_targets = pickle.load(f)
         with open(os.path.join(mj_dir, f"grid_positions_{model_name}.pkl"), "rb") as f:
             self.grid_positions = pickle.load(f)
-        
-        '''
-        with open(os.path.join(mj_dir, f"sensor_stats.pkl"), "rb") as f:
-            self.sensor_stats = pickle.load(f)
-        with open(os.path.join(mj_dir, f"hand_position_stats.pkl"), "rb") as f:
-            self.hand_position_stats = pickle.load(f)
-        with open(os.path.join(mj_dir, f"candidate_targets.pkl"), "rb") as f:
-            self.candidate_targets = pickle.load(f)
-        with open(os.path.join(mj_dir, f"grid_positions.pkl"), "rb") as f:
-            self.grid_positions = pickle.load(f)
-        '''
-        
     
     def randomize_configuration(self):
         """Randomize the configuration of all joints"""

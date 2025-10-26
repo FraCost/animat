@@ -1,4 +1,5 @@
 import pickle
+import math
 import matplotlib.pyplot as plt
 import numpy as np
 from plants import SequentialReacher
@@ -16,7 +17,7 @@ class SequentialReachingEnv:
         target_duration, 
         num_targets, 
         loss_weights, 
-        num_interneurons=20
+        num_interneurons=25
         ):
         
         self.plant = plant
@@ -26,49 +27,31 @@ class SequentialReachingEnv:
         self.logger = None
         self.num_interneurons = num_interneurons
         self.num_actuators = plant.num_actuators
-        self.W_inter_to_gamma = self.init_W_inter_to_gamma(mode='struct_indip')
+        self.W_inter_to_gamma = self.init_W_inter_to_gamma()
         self.actuator_names = self.plant.actuator_names
     
-    def init_W_inter_to_gamma(self, mode='struct_indip'):
-        if mode == 'rand':
-            return np.random.randn(self.num_actuators, self.num_interneurons) 
-
-        elif mode == 'struct_indip':  
-            if self.num_actuators % 2 != 0:
-                raise ValueError("Number of muscles must be even")
-            
-            num_joints = self.num_actuators // 2
-            W = np.zeros((self.num_actuators, self.num_interneurons))
-            
-            # Split interneurons evenly across joints
-            base = self.num_interneurons // num_joints
-            extra = self.num_interneurons % num_joints
-            start = 0
-            
-            for j in range(num_joints):
-                end = start + base + (1 if j < extra else 0)
-                num_units = end - start
-                
-                # Linear gradient for this joint
-                W0 = np.linspace(1.0, 0.0, num_units)
-                W1 = np.linspace(0.0, 1.0, num_units)
-                
-                W[2*j, start:end] = W0
-                W[2*j+1, start:end] = W1
-                
-                start = end
-            
-            return W
-
-        elif mode == 'struct_mixed':
-            # TODO: implement via optimization
-            pass
+    def init_W_inter_to_gamma(self):
+        if self.num_actuators % 2 != 0:
+            raise ValueError("Number of actuators must be even")
         
-        else:
-            raise ValueError(
-                "Invalid mode for W_inter_to_gamma initialization.\n"
-                "Choose 'rand', 'struct_indip', or 'struct_mixed'."
-            )
+        if self.num_actuators == 2:
+            W0 = np.linspace(1.0, 0.0, self.num_interneurons)
+            W1 = np.linspace(0.0, 1.0, self.num_interneurons)
+            W = np.vstack([W0, W1])
+        
+        elif self.num_actuators == 4:
+            resolution = math.isqrt(self.num_interneurons)
+            if resolution * resolution != self.num_interneurons:
+                raise ValueError(f"num_interneurons ({self.num_interneurons}) must be a perfect square.")
+            
+            gradient = np.linspace(1.0, 0.0, resolution)
+            W0 = np.repeat(gradient, resolution)
+            W1 = np.repeat(gradient[::-1], resolution)
+            W2 = np.tile(gradient, resolution)
+            W3 = np.tile(gradient[::-1], resolution)
+            W = np.vstack([W0, W1, W2, W3]) 
+                
+        return W
         
     # -----------------------------------------
     # Logging
@@ -128,7 +111,7 @@ class SequentialReachingEnv:
                 self.plant.render()
 
             context, feedback = self.plant.get_obs()
-            obs = np.concatenate([context, feedback])
+            obs = np.concatenate([context, feedback])                
 
             # RNN → interneurons
             interneurons = rnn.step(obs)
@@ -138,8 +121,8 @@ class SequentialReachingEnv:
 
             # Compute alpha activations
             spindle_lengths = np.array(feedback[:self.num_actuators])
-            alpha_act = spindle_lengths + gamma_offsets # TODO: add scaling and/or nonlinearity
-
+            alpha_act = spindle_lengths + gamma_offsets 
+            
             # Send final control signal to MuJoCo
             self.plant.step(alpha_act)
 
@@ -191,7 +174,7 @@ class SequentialReachingEnv:
         return total_reward / trial_duration
 
     # -----------------------------------------
-    # Stimulation # TODO: go back to stimulating RNN units to get multi-joint CFFs
+    # Stimulation 
     # -----------------------------------------
     def stimulate(self, units, delay=1, seed=0, render=False):
         np.random.seed(seed)
@@ -224,14 +207,24 @@ class SequentialReachingEnv:
             # Directly stimulate specified interneurons
             interneurons = np.zeros(self.num_interneurons)
             if self.plant.data.time > total_delay - delay / 2:
-                interneurons[units] = 1.0  # max activation
+                interneurons[units] = 1.0  
 
             # Interneurons → gamma offsets → alpha activations
             gamma_offsets = self.W_inter_to_gamma @ interneurons
-            alpha_act = spindle_lengths + gamma_offsets
+            alpha_act_pre = spindle_lengths + gamma_offsets
+            #alpha_act_pre = logistic(alpha_act_pre, k=1.0)
+            
+            W_inhib = 1.0
+            alpha_act_post = np.zeros_like(alpha_act_pre)
+            
+            antagonists = [(2*i, 2*i + 1) for i in range(self.num_actuators // 2)]
+
+            for i_f, i_e in antagonists:
+                alpha_act_post[i_f] = max(0.0, alpha_act_pre[i_f] - W_inhib * alpha_act_pre[i_e])
+                alpha_act_post[i_e] = max(0.0, alpha_act_pre[i_e] - W_inhib * alpha_act_pre[i_f])
 
             # Step the plant
-            self.plant.step(alpha_act)
+            self.plant.step(alpha_act_post)
 
             # Log forces
             force = self.plant.data.efc_force.copy()

@@ -1,11 +1,12 @@
 #%%
 import numpy as np
 import matplotlib
-# matplotlib.use("Agg")
+#matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from plants import SequentialReacher
 from environments import SequentialReachingEnv
 import seaborn as sns
+from utils import logistic
 
 
 #%%
@@ -40,82 +41,61 @@ cbar.ax.tick_params(labelsize=14)
 plt.tight_layout()
 plt.show()
 
-#%%
-'''
-joint_idx = 0
-muscle1_idx = 2*joint_idx     # flexor
-muscle2_idx = 2*joint_idx + 1 # extensor
-
-num_samples = 20
-timesteps = 500
-spindle_range = np.linspace(0, 1, num_samples)
-
-# Arrays to store equilibrium joint angles
-joint_angles_flexor = np.zeros(num_samples)
-joint_angles_extensor = np.zeros(num_samples)
-
-# Sweep flexor
-for i, s in enumerate(spindle_range):
-    spindle_lengths = np.zeros(env.num_actuators)
-    spindle_lengths[muscle1_idx] = s
-    spindle_lengths[muscle2_idx] = 0.5  # keep extensor constant
-    alpha_act = spindle_lengths
-    
-    for t in range(timesteps):
-        env.plant.step(alpha_act)
-        joint_angle = env.plant.get_joint_angles_deg()
-    joint_angles_flexor[i] = joint_angle['shoulder']  # equilibrium
-    
-    env.plant.reset()
-
-# Sweep extensor
-for i, s in enumerate(spindle_range):
-    spindle_lengths = np.zeros(env.num_actuators)
-    spindle_lengths[muscle1_idx] = 0.5  # keep flexor constant
-    spindle_lengths[muscle2_idx] = s
-    alpha_act = spindle_lengths
-    
-    for t in range(timesteps):
-        env.plant.step(alpha_act)
-        joint_angle = env.plant.get_joint_angles_deg()
-    joint_angles_extensor[i] = joint_angle['shoulder']  # equilibrium
-    
-    env.plant.reset()
-
-plt.figure(figsize=(6,4))
-plt.plot(spindle_range, joint_angles_flexor, label="Flexor", linewidth=2.5)
-plt.plot(spindle_range, joint_angles_extensor, label="Extensor", linewidth=2.5)
-plt.xlabel("Spindle activity", fontsize=18)
-plt.ylabel("Joint angle (deg)", fontsize=18)
-plt.xticks(fontsize=14)
-plt.yticks(fontsize=14)
-plt.legend(fontsize=14)
-ax = plt.gca()
-ax.spines['top'].set_visible(False)
-ax.spines['right'].set_visible(False)
-plt.show()
-'''
 
 # %%
-timesteps = 500
-joint_angles = np.zeros(env.num_interneurons)
-thetas = np.zeros(timesteps)
+timesteps = 2000
+stim_on = 250
+stim_off = 1250
+W_inhib = 0.5
+interneuron_activation = 2.0
+antagonists = [(2*i, 2*i + 1) for i in range(env.num_actuators // 2)]
+
+logger = {
+    "alpha": np.zeros((timesteps, env.num_interneurons, 2)),
+    "spindle": np.zeros((timesteps, env.num_interneurons, 2)),
+    "joint_angle": np.zeros((timesteps, env.num_interneurons))
+}
+
 for i in range(env.num_interneurons):
     interneurons = np.zeros(env.num_interneurons)
-    interneurons[i] = 1.0  
-    gamma_offsets = env.W_inter_to_gamma @ interneurons
+    interneurons[i] = interneuron_activation
+    gamma_activation = env.W_inter_to_gamma @ interneurons
 
     for t in range(timesteps):
         _, feedback = env.plant.get_obs()
         spindle_lengths = np.array(feedback[:env.num_actuators])
-        alpha_act = spindle_lengths + gamma_offsets
-        env.plant.step(alpha_act)
+        
+        if t < stim_on or t > stim_off:
+            spindle_activation = spindle_lengths        
+        else:
+            spindle_activation = spindle_lengths + gamma_activation
+        #TODO: modle gamma dynamics (memory/decay) & re-adjustment
+        #TODO: normalize spindle length to (0, 1) ??
+            
+        alpha_activation = np.zeros_like(spindle_activation)
+        for f, e in antagonists:
+            alpha_activation[f] = max(0.0, spindle_activation[f] - W_inhib * spindle_activation[e])
+            alpha_activation[e] = max(0.0, spindle_activation[e] - W_inhib * spindle_activation[f])
+
+        env.plant.step(alpha_activation)
         #env.plant.render()
-        thetas[t] = env.plant.get_joint_angles_deg()['shoulder']
-    joint_angles[i] = max(thetas, key=abs) 
+        
+        logger["joint_angle"][t, i] = env.plant.get_joint_angles_deg()['shoulder']
+        logger["alpha"][t, i] = alpha_activation 
+        logger["spindle"][t, i] = spindle_activation
+        
     env.plant.reset()
 
 
+# %% Plot
+from matplotlib.colors import LinearSegmentedColormap
+
+def color_gradient(min, max, N):
+    cmap = LinearSegmentedColormap.from_list("blue_gradient", [min, max], N=N)
+    return [cmap(i/(N-1)) for i in range(N)]
+
+# Joint angles
+joint_angles = np.array([max(logger['joint_angle'][stim_on : stim_off, i], key=abs) for i in range(env.num_interneurons)])
 fontsize = 18
 plt.figure(figsize=(5, 5))
 theta = np.radians(joint_angles)  
@@ -126,10 +106,46 @@ for t, rad, c in zip(theta, r, colors):
     ax.plot(t, rad, marker='.', markersize=15, color=c, linestyle='None')
 ax.set_theta_zero_location("N")
 ax.set_theta_direction(-1)  
-ax.set_thetamin(-60)
-ax.set_thetamax(60)
+ax.set_thetamin(-65)
+ax.set_thetamax(65)
 ax.set_rticks([])
 ax.tick_params(labelsize=14)
 ax.set_xlabel("Joint angle (deg)", fontsize=fontsize, labelpad=0)
 plt.show()
-# %%
+
+# Alpha dynamics
+e_col = color_gradient((1, 0.9, 0.8), (1, 0.4, 0), env.num_interneurons)
+f_col = color_gradient((0.8, 0.9, 1), (0, 0, 0.8), env.num_interneurons)
+
+plt.figure(figsize=(10, 4))
+for i in range(env.num_interneurons):
+    plt.plot(logger['alpha'][:, i, 0], c=f_col[i])
+plt.xlabel('Time step', fontsize=14)
+plt.ylabel('Alpha drive', fontsize=14)
+plt.tight_layout()
+plt.show()
+    
+plt.figure(figsize=(10, 4))
+plt.plot(logger['alpha'][:, i, 0], c=f_col[i])
+plt.plot(logger['alpha'][:, i, 1], c=e_col[i])
+plt.xlabel('Time step', fontsize=14)
+plt.ylabel('Alpha drive', fontsize=14)
+plt.tight_layout()
+plt.show()
+
+# Spindle dynamics
+plt.figure(figsize=(10, 4))
+plt.plot(logger['spindle'][:, i, 0], c=f_col[i])
+plt.plot(logger['spindle'][:, i, 1], c=e_col[i])
+plt.xlabel('Time step', fontsize=14)
+plt.ylabel('Spindle activation', fontsize=14)
+plt.tight_layout()
+plt.show()
+
+# Joint angle dynamics
+plt.figure(figsize=(10, 4))
+plt.plot(logger['joint_angle'][:, i], c='k')
+plt.xlabel('Time step', fontsize=14)
+plt.ylabel('Spindle activation', fontsize=14)
+plt.tight_layout()
+plt.show()

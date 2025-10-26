@@ -22,7 +22,7 @@ if __name__ == "__main__":
         plant=reacher,
         target_duration={"mean": 3, "min": 1, "max": 6},
         num_targets=10,
-        num_interneurons=20,
+        num_interneurons=25,
         loss_weights={
             "euclidean": 1,
             "manhattan": 0,
@@ -47,7 +47,7 @@ if __name__ == "__main__":
     # 4) Evolutionary optimization (CMA-ES)
     # ----------------------------------------------------------
     optimizer = CMA(mean=rnn.get_params(), sigma=1.3)
-    num_generations = 3 #10000
+    num_generations = 10000
     fitnesses = []
 
     for gen in range(num_generations):
@@ -58,7 +58,9 @@ if __name__ == "__main__":
             fitness = -env.evaluate(rnn.from_params(x), seed=gen)
             solutions.append((x, fitness))
             fitnesses.append((gen, i, fitness))
-            print(f"#{gen}.{i}  Fitness: {fitness:.4f}")
+            
+            if gen % 100 == 0:
+                print(f"#{gen}.{i}  Fitness: {fitness:.4f}")
 
         optimizer.tell(solutions)
 
@@ -68,8 +70,8 @@ if __name__ == "__main__":
             env.evaluate(best_rnn, seed=0, render=False, log=True)
             env.plot()
 
-        if gen % 1000 == 0:
-            file = f"../../models/optimizer_gen_{gg}_cmaesv2.pkl"
+        if gen % 500 == 0:
+            file_path = f"/Users/teachinglab/Documents/code/paton_lab/animat/models/optimizer_gen_{gen}_cmaes_hand_wired_net.pkl"
             with open(file_path, "wb") as f:
                 pickle.dump(optimizer, f)
 

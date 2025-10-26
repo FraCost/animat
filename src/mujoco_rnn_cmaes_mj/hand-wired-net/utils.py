@@ -40,8 +40,8 @@ def beta_from_mean(mu, nu=5, num_samples=1):
     return beta.rvs(alpha, beta_, size=num_samples)
 
 
-def logistic(x):
-    return 1 / (1 + np.exp(-x))
+def logistic(x, k=1.0):
+    return 1 / (1 + np.exp(-k * x))
 
 
 def tanh(x):
