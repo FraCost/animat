@@ -17,7 +17,8 @@ class SequentialReachingEnv:
         target_duration, 
         num_targets, 
         loss_weights, 
-        num_interneurons=25
+        num_interneurons=25,
+        W_inhib=0.5
         ):
         
         self.plant = plant
@@ -26,6 +27,7 @@ class SequentialReachingEnv:
         self.loss_weights = loss_weights
         self.logger = None
         self.num_interneurons = num_interneurons
+        self.W_inhib = W_inhib 
         self.num_actuators = plant.num_actuators
         self.W_inter_to_gamma = self.init_W_inter_to_gamma()
         self.actuator_names = self.plant.actuator_names
@@ -89,6 +91,7 @@ class SequentialReachingEnv:
     def evaluate(self, rnn, seed=0, render=False, log=False):
         np.random.seed(seed)
         rnn.init_state()
+        antagonists = [(2*i, 2*i + 1) for i in range(self.num_actuators // 2)]
         self.plant.reset()
 
         target_positions = self.plant.sample_targets(self.num_targets)
@@ -117,22 +120,27 @@ class SequentialReachingEnv:
             interneurons = rnn.step(obs)
 
             # Interneurons → gamma MN offsets
-            gamma_offsets = self.W_inter_to_gamma @ interneurons  
+            gamma_activation = self.W_inter_to_gamma @ interneurons  
 
             # Compute alpha activations
             spindle_lengths = np.array(feedback[:self.num_actuators])
-            alpha_act = spindle_lengths + gamma_offsets 
+            spindle_activation = spindle_lengths + gamma_activation 
             
+            alpha_activation = np.zeros_like(spindle_activation)
+            for f, e in antagonists:
+                alpha_activation[f] = max(0.0, spindle_activation[f] - self.W_inhib * spindle_activation[e])
+                alpha_activation[e] = max(0.0, spindle_activation[e] - self.W_inhib * spindle_activation[f])
+
             # Send final control signal to MuJoCo
-            self.plant.step(alpha_act)
+            self.plant.step(alpha_activation)
 
             previous_hand_position = hand_position
             hand_position = self.plant.get_hand_pos()
             target_position = target_positions[target_idx]
             manhattan_distance = l1_norm(target_position - hand_position)
             euclidean_distance = l2_norm(target_position - hand_position)
-            energy = np.mean(np.abs(alpha_act))
-            entropy = action_entropy(alpha_act)
+            energy = np.mean(np.abs(alpha_activation))
+            entropy = action_entropy(alpha_activation)
 
             reward = -(
                 euclidean_distance * self.loss_weights["euclidean"]
