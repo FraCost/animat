@@ -54,19 +54,24 @@ if __name__ == "__main__":
         solutions = []
 
         for i in range(optimizer.population_size):
-            x = optimizer.ask()
-            fitness = -env.evaluate(rnn.from_params(x), seed=gen)
+            # a) Generates a new candidate RNN parameter vector
+            x = optimizer.ask() 
+            
+            # b) Evaluate candidate parameters
+            fitness = -env.evaluate(rnn.from_params(x), seed=gen) 
             solutions.append((x, fitness))
             fitnesses.append((gen, i, fitness))
             
             if gen % 100 == 0:
                 print(f"#{gen}.{i}  Fitness: {fitness:.4f}")
 
+        # c) Informs CMA-ES of fitnesses of all candidates
         optimizer.tell(solutions)
 
+        # d) Sets the RNN weights to the candidate solution
         best_rnn = rnn.from_params(optimizer.mean)
 
-        if gen % 10 == 0:
+        if gen % 100 == 0:
             env.evaluate(best_rnn, seed=0, render=False, log=True)
             env.plot()
 
