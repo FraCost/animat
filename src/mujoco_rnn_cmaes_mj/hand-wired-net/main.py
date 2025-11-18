@@ -1,113 +1,82 @@
-import pickle
+import os
 import numpy as np
-import matplotlib.pyplot as plt
+from stable_baselines3 import PPO
+from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor
+from stable_baselines3.common.callbacks import CheckpointCallback
+from stable_baselines3.common.logger import configure
 from plants import SequentialReacher
+from networks import LowLevelController
 from environments import SequentialReachingEnv
-from networks import RNN
-from utils import *
-from cmaes import CMA
+from loggers import EpisodeLoggerCallback
+from environment_factory import make_env
+
+
+def main(mode, 
+         base_path, 
+         timesteps=1_000_000, 
+         checkpoint_freq=250_000, 
+         print_freq=250, 
+         save_freq=1000, 
+         num_envs=4):
+    
+    # ---------------------------------------------
+    # Initialize parallel environments
+    # ---------------------------------------------
+    plant_config = {"class": SequentialReacher, "kwargs": {"plant_xml_file": "arm.xml"}}
+    llctrl_config = {"class": LowLevelController, "kwargs": {"num_units": 25, "weights_inhibit": 0.2, "k_l": 0.05, "k_v": 0.025, "k_g": 1.0}}
+    env_config = {"class": SequentialReachingEnv, "kwargs": {"target_duration": {"mean": 3.0, "min": 1.0, "max": 6.0}, "num_targets": 1, "reward_params": {"l0_weight": 0.01, "bonus": 1.0}}}
+
+    vec_env = SubprocVecEnv([
+        make_env(mode, plant_config, env_config, llctrl_config, seed=i) for i in range(num_envs)
+    ])
+    vec_env = VecMonitor(vec_env)
+
+    # ---------------------------------------------
+    # PPO model setup
+    # ---------------------------------------------
+    model = PPO(
+        "MlpPolicy",
+        vec_env,
+        verbose=0,
+        gamma=0.99,
+        learning_rate=1e-4,
+        n_steps=1024,
+        batch_size=64,
+        n_epochs=8,
+        ent_coef=0.01,
+        policy_kwargs = dict(net_arch=[256, 256]),
+        tensorboard_log=os.path.join(base_path, f"tensorboard_ppo_{mode}")
+    )
+
+    # ---------------------------------------------
+    # Checkpoint & logging
+    # ---------------------------------------------
+    checkpoint_callback = CheckpointCallback(
+        save_freq=checkpoint_freq,
+        save_path=os.path.join(base_path, "checkpoints"),
+        name_prefix=f"ppo_arm_{mode}"
+    )
+        
+    episode_logger = EpisodeLoggerCallback(
+        print_freq=print_freq,
+        save_freq=save_freq,
+        log_actions=(mode == "discrete_llctrl"),
+        save_path=os.path.join(os.path.join(base_path, "logs"), f"episode_stats_{mode}.npz")
+    )
+
+    # ---------------------------------------------
+    # Train controller
+    # ---------------------------------------------
+    model.learn(
+        total_timesteps=timesteps,
+        callback=[checkpoint_callback, episode_logger]
+    )
 
 
 if __name__ == "__main__":
-
-    # ----------------------------------------------------------
-    # 1) Initialize the Mujoco plant
-    # ----------------------------------------------------------
-    reacher = SequentialReacher(plant_xml_file="arm.xml")
-
-    # ----------------------------------------------------------
-    # 2) Initialize task
-    # ----------------------------------------------------------
-    env = SequentialReachingEnv(
-        plant=reacher,
-        target_duration={"mean": 3, "min": 1, "max": 6},
-        num_targets=10,
-        num_interneurons=25,
-        loss_weights={
-            "euclidean": 1,
-            "manhattan": 0,
-            "energy": 0,
-            "ridge": 0,
-            "lasso": 0
-        }
-    )
-
-    # ----------------------------------------------------------
-    # 3) Define RNN policy
-    # ----------------------------------------------------------
-    rnn = RNN(
-        input_size=3 + reacher.num_sensors,
-        hidden_size=25,
-        output_size=env.num_interneurons,
-        activation=tanh,
-        alpha=reacher.model.opt.timestep / 0.01
-    )
-
-    # ----------------------------------------------------------
-    # 4) Evolutionary optimization (CMA-ES)
-    # ----------------------------------------------------------
-    optimizer = CMA(mean=rnn.get_params(), sigma=1.3)
-    num_generations = 10000
-    fitnesses = []
-
-    for gen in range(num_generations):
-        solutions = []
-
-        for i in range(optimizer.population_size):
-            # a) Generates a new candidate RNN parameter vector
-            x = optimizer.ask() 
-            
-            # b) Evaluate candidate parameters
-            fitness = -env.evaluate(rnn.from_params(x), seed=gen) 
-            solutions.append((x, fitness))
-            fitnesses.append((gen, i, fitness))
-            
-            if gen % 100 == 0:
-                print(f"#{gen}.{i}  Fitness: {fitness:.4f}")
-
-        # c) Informs CMA-ES of fitnesses of all candidates
-        optimizer.tell(solutions)
-
-        # d) Sets the RNN weights to the candidate solution
-        best_rnn = rnn.from_params(optimizer.mean)
-
-        if gen % 100 == 0:
-            env.evaluate(best_rnn, seed=0, render=False, log=True)
-            env.plot()
-
-        if gen % 500 == 0:
-            file_path = f"/Users/teachinglab/Documents/code/paton_lab/animat/models/optimizer_gen_{gen}_cmaes_hand_wired_net.pkl"
-            with open(file_path, "wb") as f:
-                pickle.dump(optimizer, f)
-
-    # ----------------------------------------------------------
-    # 5) Plot fitness over generations
-    # ----------------------------------------------------------
-    fitnesses = np.array(fitnesses)
-    generations = np.unique(fitnesses[:, 0])
-    avg_fitness = []
-    std_fitness = []
-
-    for gen in generations:
-        gen_fitness = fitnesses[fitnesses[:, 0] == gen][:, 2]
-        avg_fitness.append(np.mean(gen_fitness))
-        std_fitness.append(np.std(gen_fitness))
-
-    avg_fitness = np.array(avg_fitness)
-    std_fitness = np.array(std_fitness)
-
-    plt.figure()
-    plt.plot(generations, avg_fitness, label="Average Fitness")
-    plt.fill_between(
-        generations,
-        avg_fitness - std_fitness,
-        avg_fitness + std_fitness,
-        color="blue",
-        alpha=0.2,
-        label="Standard Deviation"
-    )
-    plt.legend()
-    plt.xlabel("Generation")
-    plt.ylabel("Objective Function Value (Loss)")
-    plt.title("Fitness During CMA-ES Optimization")
-    plt.show()
+    #mode = "continuous_llctrl"
+    #mode = "discrete_llctrl"
+    #mode = "direct"
+    mode = "target_llctrl"
+    base_path = "/Users/teachinglab/Documents/code/paton_lab/animat/src/mujoco_rnn_cmaes_mj/hand-wired-net/models"
+    main(mode, base_path)

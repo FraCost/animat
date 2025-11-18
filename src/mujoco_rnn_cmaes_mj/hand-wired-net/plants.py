@@ -8,8 +8,8 @@ from utils import *
 
 
 class SequentialReacher:
-    def __init__(self, plant_xml_file="arm.xml"):
-        """Initialize Mujoco simulation"""
+    def __init__(self, plant_xml_file="arm.xml", control_timestep=0.02):
+        """Initialize Mujoco simulation with control timestep"""
         mj_dir = os.path.join(get_root_path(), "mujoco")
         xml_path = os.path.join(mj_dir, plant_xml_file)
         
@@ -19,11 +19,14 @@ class SequentialReacher:
         self.num_actuators = self.model.nu
         self.num_joints = self.model.njnt
         self.viewer = None
-        
+
+        # Control timestep: duration of one RL action (seconds)
+        self.control_timestep = control_timestep
+        self.n_substeps = max(1, int(np.round(self.control_timestep / self.model.opt.timestep)))
+
         try:
             self.actuator_names = [self.model.actuator(i).name for i in range(self.num_actuators)]
         except AttributeError:
-            # fallback if not available
             self.actuator_names = [f"muscle{i}" for i in range(self.num_actuators)]
 
         # End-effector and sensor
@@ -44,14 +47,15 @@ class SequentialReacher:
         with open(os.path.join(mj_dir, f"grid_positions_{model_name}.pkl"), "rb") as f:
             self.grid_positions = pickle.load(f)
     
+    # -------------------------
+    # Configuration and IK
+    # -------------------------
     def randomize_configuration(self):
-        """Randomize the configuration of all joints"""
         for i in range(self.model.nq):
             self.data.qpos[i] = np.random.uniform(np.deg2rad(-60), np.deg2rad(60))
         mujoco.mj_forward(self.model, self.data)
 
     def solve_ik(self, target_pos, max_iters=100, tol=1e-4, alpha=0.5):
-        """Solve inverse kinematics for any number of joints"""
         dof_idxs = [self.model.jnt_dofadr[j] for j in range(self.num_joints)]
 
         for _ in range(max_iters):
@@ -62,20 +66,23 @@ class SequentialReacher:
             if np.linalg.norm(error) < tol:
                 break
 
-            # Compute full Jacobian
+            # Full Jacobian
             J = np.zeros((3, self.model.nv))
             mujoco.mj_jacSite(self.model, self.data, J, None, self.hand_id)
-            J_reduced = J[:, dof_idxs]  # shape (3, num_joints)
+            J_reduced = J[:, dof_idxs]
 
-            # Least-squares update
             dq = alpha * np.linalg.pinv(J_reduced) @ error
 
-            # Apply update and clip to joint limits
             for i, dof in enumerate(dof_idxs):
-                self.data.qpos[dof] = np.clip(self.data.qpos[dof] + dq[i],
-                                              np.deg2rad(-60), np.deg2rad(60))
+                self.data.qpos[dof] = np.clip(
+                    self.data.qpos[dof] + dq[i],
+                    np.deg2rad(-60), np.deg2rad(60)
+                )
         mujoco.mj_forward(self.model, self.data)
 
+    # -------------------------
+    # Target handling
+    # -------------------------
     def sample_targets(self, num_samples=10):
         return self.candidate_targets.sample(num_samples).values
 
@@ -90,6 +97,9 @@ class SequentialReacher:
         self.data.eq_active[0] = 1
         mujoco.mj_forward(self.model, self.data)
 
+    # -------------------------
+    # Reset / Observations
+    # -------------------------
     def reset(self):
         mujoco.mj_resetData(self.model, self.data)
         mujoco.mj_forward(self.model, self.data)
@@ -112,11 +122,19 @@ class SequentialReacher:
     def get_hand_pos(self):
         return self.data.geom_xpos[self.hand_id].copy()
 
+    # -------------------------
+    # Step function with control timestep
+    # -------------------------
     def step(self, muscle_activations):
+        """Apply action for control_timestep duration"""
         self.data.ctrl[:] = muscle_activations
-        mujoco.mj_step(self.model, self.data)
+        for _ in range(self.n_substeps):
+            mujoco.mj_step(self.model, self.data)
 
-    def render(self):
+    # -------------------------
+    # Rendering
+    # -------------------------
+    def render(self, mode="human", fps=30):
         if self.viewer is None:
             self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
             self.viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_JOINT] = True
@@ -128,8 +146,11 @@ class SequentialReacher:
         else:
             if self.viewer.is_running():
                 self.viewer.sync()
-                time.sleep(self.model.opt.timestep)
+                time.sleep(1.0 / fps) 
 
+    # -------------------------
+    # Utilities
+    # -------------------------
     def get_force_at_eq(self, eq_name):
         eq_id = None
         for i in range(self.model.neq):
@@ -157,12 +178,12 @@ class SequentialReacher:
 
         force_vec = self.data.efc_force[efc_start : efc_start + constraint_dim]
         return force_vec
-    
+
     def get_joint_angles_deg(self):
         joint_angles = {}
         for j in range(self.num_joints):
             joint_name = self.model.joint(j).name
-            qpos_index = self.model.jnt_dofadr[j]  # index in qpos
+            qpos_index = self.model.jnt_dofadr[j]
             joint_angles[joint_name] = np.rad2deg(self.data.qpos[qpos_index])
         return joint_angles
 
@@ -170,3 +191,17 @@ class SequentialReacher:
         if self.viewer is not None:
             self.viewer.close()
             self.viewer = None
+
+    def get_feedback_range(self):
+        norm_sensor_min = zscore(
+            self.sensor_stats["min"].values,
+            self.sensor_stats["mean"].values,
+            self.sensor_stats["std"].values,
+        )
+        norm_sensor_max = zscore(
+            self.sensor_stats["max"].values,
+            self.sensor_stats["mean"].values,
+            self.sensor_stats["std"].values,
+        )
+        
+        return norm_sensor_min, norm_sensor_max

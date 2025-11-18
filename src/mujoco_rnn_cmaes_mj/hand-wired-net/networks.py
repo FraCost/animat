@@ -1,153 +1,144 @@
 import copy
 from utils import *
+import math
 
 
-class RNN:
-    def __init__(self, input_size, hidden_size, output_size, activation, alpha):
-        self.input_size = input_size
-        self.hidden_size = hidden_size
-        self.output_size = output_size
-        self.activation = activation
-        self.alpha = alpha
-        if activation == relu:
-            self.init_fcn = he_init
+# ----------------------------------------------------------
+# Low-level controller
+# ----------------------------------------------------------
+class LowLevelController:
+    def __init__(self, num_units, plant, weights_inhibit=0.2, k_l=0.05, k_v=0.025, k_g=1.0, mode="multi_joint"):
+        self.num_units = num_units
+        self.plant = plant
+        self.num_actuators = self.plant.num_actuators
+        self.weights_inhibit = weights_inhibit
+        self.mode = mode
+        self.weights = self.init_weights(self.mode)
+        self.max_alpha_activation = None
+        self.dt = self.plant.control_timestep
+        self.alpha_state = np.zeros(self.num_actuators)
+        self.k_l = k_l
+        self.k_v = k_v
+        self.k_g = k_g
+        self.unit_target_positions = None
+
+    def init_weights(self, mode="single_joint"):
+        if self.num_actuators % 2 != 0:
+            raise ValueError("Number of actuators must be even")
+        
+        if self.num_actuators == 2:
+            W0 = np.linspace(1.0, 0.0, self.num_units)
+            W1 = np.linspace(0.0, 1.0, self.num_units)
+            W = np.vstack([W0, W1])
+        
+        elif self.num_actuators == 4:
+            if mode == "multi_joint":
+                resolution = math.isqrt(self.num_units)
+                if resolution * resolution != self.num_units:
+                    raise ValueError(f"num_units ({self.num_units}) must be a perfect square.")
+                gradient = np.linspace(1.0, 0.0, resolution)
+                W0 = np.repeat(gradient, resolution)
+                W1 = np.repeat(gradient[::-1], resolution)
+                W2 = np.tile(gradient, resolution)
+                W3 = np.tile(gradient[::-1], resolution)
+                W = np.vstack([W0, W1, W2, W3])
+            
+            elif mode == "single_joint":
+                half_units = self.num_units // 2
+                # First joint: first half of neurons active, second half zero
+                grad = np.linspace(1.0, 0.0, half_units)
+                W0 = np.concatenate([grad, np.zeros(half_units)])
+                W1 = np.concatenate([grad[::-1], np.zeros(half_units)])
+                # Second joint: first half zero, second half active
+                W2 = np.concatenate([np.zeros(half_units), grad])
+                W3 = np.concatenate([np.zeros(half_units), grad[::-1]])
+                W = np.vstack([W0, W1, W2, W3])
+            
+            else:
+                raise ValueError(f"Unknown mode: {mode}")
+        
+        return W
+
+    def step(self, activation, feedback, rescale=True, tau=0.03):
+        gamma_activation = self.weights @ activation
+        
+        spindle_lengths = np.array(feedback[:self.num_actuators])
+        spindle_velocities = np.array(feedback[self.num_actuators:]) 
+
+        spindle_activation = (self.k_g * gamma_activation) + (self.k_l * spindle_lengths) + (self.k_v * spindle_velocities)
+        spindle_activation = np.maximum(0.0, spindle_activation)
+
+        antagonists = [(2 * i, 2 * i + 1) for i in range(self.num_actuators // 2)]
+        alpha_raw = np.zeros_like(spindle_activation)
+        for f, e in antagonists:
+            alpha_raw[f] = max(0.0, spindle_activation[f] - self.weights_inhibit * spindle_activation[e])
+            alpha_raw[e] = max(0.0, spindle_activation[e] - self.weights_inhibit * spindle_activation[f])
+
+        # First-order dynamics: τ dα/dt = α_raw - α
+        self.alpha_state += (self.dt / tau) * (alpha_raw - self.alpha_state)
+        alpha_activation = self.alpha_state
+
+        if rescale and self.max_alpha_activation is not None:
+            alpha_activation = np.clip(alpha_activation / self.max_alpha_activation, 0, 1)
+
+        return alpha_activation
+        
+    def get_max_alpha_activation(self, max_input=1.0, n_samples=100000, seed=23, discrete=False):
+        
+        if discrete:
+            _, max_obs = self.plant.get_feedback_range()
+            max_spindle_len = max_obs[:self.num_actuators]
+            max_spindle_vel = max_obs[self.num_actuators:self.num_actuators*2]
+            max_spindle_activation = (self.k_g * max_input) + (self.k_l * max_spindle_len) + (self.k_v * max_spindle_vel)
+            self.max_alpha_activation = max_spindle_activation * (1 - self.weights_inhibit)
+        
         else:
-            self.init_fcn = xavier_init
-        self.init_weights()
-        self.init_biases()
-        self.init_state()
-        self.num_params = len(self.get_params())
+            if seed is not None:
+                np.random.seed(seed)
+            
+            max_alpha = np.zeros(self.num_actuators)
 
-    def __eq__(self, other):
-        if isinstance(other, RNN):
-            return all(self.get_params() == other.get_params())
-        return False
+            for _ in range(n_samples):
+                activation = np.random.uniform(0, max_input, self.num_units) 
+                _, feedback = self.plant.get_obs()
+                feedback = feedback[:self.num_actuators*2]
+                alpha = self.step(activation, feedback, rescale=False)
+                max_alpha = np.maximum(max_alpha, alpha)
+                self.plant.step(alpha)
+                self.reset_state()
 
-    def init_weights(self):
-        self.W_in = self.init_fcn(n_in=self.input_size, n_out=self.hidden_size)
-        self.W_h = self.init_fcn(n_in=self.hidden_size, n_out=self.hidden_size)
-        self.W_out = self.init_fcn(n_in=self.hidden_size, n_out=self.output_size)
+            self.max_alpha_activation = max_alpha
+            self.plant.reset()
 
-    def init_biases(self):
-        self.b_h = np.zeros(self.hidden_size)
-        self.b_out = np.zeros(self.output_size)
+    def reset_state(self):
+        self.alpha_state = np.zeros(self.num_actuators)
+        
+    def get_unit_targets(self, steps=100, activation=1.0):
+        unit_targets = np.zeros((self.num_units, 3))
 
-    def init_state(self):
-        """Reset hidden state between episodes"""
-        self.h = np.zeros(self.hidden_size)
-        self.out = np.zeros(self.output_size)
+        for u in range(self.num_units):
+            self.plant.reset()
+            self.reset_state()
 
-    def step(self, obs):
-        """Compute one RNN step"""
-        self.h = (1 - self.alpha) * self.h + self.alpha * self.activation(
-            self.W_in @ obs + self.W_h @ self.h + self.b_h
-        )
-        self.out = (1 - self.alpha) * self.out + self.alpha * logistic(
-            self.W_out @ self.h + self.b_out
-        )
-        return self.out
+            act = np.zeros(self.num_units)
+            act[u] = activation
 
-    def get_params(self):
-        return np.concatenate(
-            [
-                self.W_in.flatten(),
-                self.W_h.flatten(),
-                self.W_out.flatten(),
-                self.b_h.flatten(),
-                self.b_out.flatten(),
-            ]
-        )
+            for _ in range(steps):
+                _, feedback = self.plant.get_obs()
+                feedback = feedback[:self.num_actuators * 2]
 
-    def set_params(self, params):
-        idx = 0
-        W_in_size = self.input_size * self.hidden_size
-        W_h_size = self.hidden_size * self.hidden_size
-        W_out_size = self.hidden_size * self.output_size
+                alpha = self.step(act, feedback)
+                self.plant.step(alpha)
 
-        self.W_in = params[idx : idx + W_in_size].reshape(
-            self.input_size, self.hidden_size
-        )
-        idx += W_in_size
-        self.W_h = params[idx : idx + W_h_size].reshape(
-            self.hidden_size, self.hidden_size
-        )
-        idx += W_h_size
-        self.W_out = params[idx : idx + W_out_size].reshape(
-            self.hidden_size, self.output_size
-        )
-        idx += W_out_size
+            unit_targets[u] = self.plant.get_hand_pos()
+        
+        normalized_targets = np.zeros_like(unit_targets)
+        mean = self.plant.hand_position_stats["mean"].values
+        std = self.plant.hand_position_stats["std"].values
 
-        self.b_h = params[idx : idx + self.hidden_size]
-        idx += self.hidden_size
-        self.b_out = params[idx : idx + self.output_size]
+        for u in range(self.num_units):
+            normalized_targets[u] = zscore(unit_targets[u], mean, std)
+            
+        self.unit_target_positions = normalized_targets
+        return self.unit_target_positions
 
-    def from_params(self, params):
-        """Return a new RNN with weights and biases from flattened parameters."""
-        idx = 0
-
-        def extract(shape):
-            nonlocal idx
-            size = np.prod(shape)
-            param = params[idx : idx + size].reshape(shape)
-            idx += size
-            return param
-
-        new_rnn = copy.deepcopy(self)
-        new_rnn.W_in = extract((self.hidden_size, self.input_size))
-        new_rnn.W_h = extract((self.hidden_size, self.hidden_size))
-        new_rnn.W_out = extract((self.output_size, self.hidden_size))
-        new_rnn.b_h = extract((self.hidden_size,))
-        new_rnn.b_out = extract((self.output_size,))
-        return new_rnn
-
-    @staticmethod
-    def from_params_static(
-        params, input_size, hidden_size, output_size, activation, alpha
-    ):
-        """Create a new RNN from flattened parameters."""
-        idx = 0
-
-        def extract(shape):
-            nonlocal idx
-            size = np.prod(shape)
-            param = params[idx : idx + size].reshape(shape)
-            idx += size
-            return param
-
-        new_rnn = RNN(input_size, hidden_size, output_size, activation, alpha)
-        new_rnn.W_in = extract((input_size, hidden_size))
-        new_rnn.W_h = extract((hidden_size, hidden_size))
-        new_rnn.W_out = extract((hidden_size, output_size))
-        new_rnn.b_h = extract((hidden_size,))
-        new_rnn.b_out = extract((output_size,))
-        return new_rnn
-
-    @staticmethod
-    def recombine(p1, p2):
-        child = RNN(
-            p1.input_size,
-            p1.hidden_size,
-            p1.output_size,
-            p1.activation,
-            p1.alpha,
-        )
-        child.W_in = RNN.recombine_matrices(p1.W_in, p2.W_in)
-        child.W_h = RNN.recombine_matrices(p1.W_h, p2.W_h)
-        child.W_out = RNN.recombine_matrices(p1.W_out, p2.W_out)
-        child.b_h = RNN.recombine_matrices(p1.b_h, p2.b_h)
-        child.b_out = RNN.recombine_matrices(p1.b_out, p2.b_out)
-        return child
-
-    @staticmethod
-    def recombine_matrices(A, B):
-        mask = np.random.rand(*A.shape) > 0.5
-        return np.where(mask, A, B)
-
-    def mutate(self, rate):
-        mutant = copy.deepcopy(self)
-        mutant.W_in += self.init_fcn(mutant.input_size, mutant.hidden_size) * rate
-        mutant.W_h += self.init_fcn(mutant.hidden_size, mutant.hidden_size) * rate
-        mutant.W_out += self.init_fcn(mutant.hidden_size, mutant.output_size) * rate
-        mutant.b_h += np.random.randn(mutant.hidden_size) * rate
-        mutant.b_out += np.random.randn(mutant.output_size) * rate
-        return mutant
